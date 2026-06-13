@@ -1,5 +1,3 @@
-# Terraform AWS Interview Demo - Complete Guide
-
 ## 📚 Table of Contents
 
 1. [Overview](#overview)
@@ -12,7 +10,7 @@
 
 ## Overview
 
-This is a **production-grade Terraform AWS infrastructure** project designed for senior DevOps engineer interviews. It demonstrates:
+This is a **production-grade Terraform AWS infrastructure** project. It demonstrates:
 
 ✅ **Infrastructure as Code (IaC)** best practices  
 ✅ **Modular Terraform design** for reusability  
