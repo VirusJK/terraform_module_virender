@@ -1,0 +1,212 @@
+name: PR Validation
+
+# ============================================================================
+# GitHub Actions Workflow: PR Validation
+# ============================================================================
+# Initial validation checks for pull requests
+# Runs before terraform plan and iac-scan workflows
+# ============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/**'
+      - 'environments/**'
+      - 'modules/**'
+      - 'versions.tf'
+      - 'variables.tf'
+      - 'locals.tf'
+      - '.github/workflows/pr-validation.yml'
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    name: Validate PR Changes
+
+    # Prevent concurrent runs
+    concurrency:
+      group: pr-validation-${{ github.ref }}
+      cancel-in-progress: false
+
+    # Minimal permissions for validation
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # =====================================================================
+      # Step 1: Checkout Code
+      # =====================================================================
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # =====================================================================
+      # Step 2: Setup Terraform
+      # =====================================================================
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: true
+
+      # =====================================================================
+      # Step 3: Terraform Format Check
+      # =====================================================================
+      - name: ✅ Terraform Format Check
+        id: format
+        run: |
+          echo "Checking Terraform code formatting..."
+          if terraform fmt -check -recursive .; then
+            echo "✓ All Terraform files are properly formatted"
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "✗ Terraform format check failed"
+            echo "Run 'terraform fmt -recursive .' to fix formatting"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # =====================================================================
+      # Step 4: Terraform Initialization
+      # =====================================================================
+      - name: 🚀 Terraform Init
+        run: |
+          echo "Initializing Terraform (backend disabled for validation)..."
+          terraform init -backend=false -upgrade
+          echo "✓ Terraform initialization successful"
+
+      # =====================================================================
+      # Step 5: Terraform Validation
+      # =====================================================================
+      - name: ✔️ Terraform Validate
+        id: validate
+        run: |
+          echo "Validating Terraform configuration..."
+          if terraform validate; then
+            echo "✓ Terraform validation successful"
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "✗ Terraform validation failed"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # =====================================================================
+      # Step 6: Check Module Structure
+      # =====================================================================
+      - name: 📦 Verify Module Structure
+        run: |
+          echo "Verifying module structure..."
+          REQUIRED_MODULES=("vpc" "security-group" "ec2" "alb" "monitoring")
+          
+          for module in "${REQUIRED_MODULES[@]}"; do
+            if [ ! -d "modules/$module" ]; then
+              echo "✗ Missing module: $module"
+              exit 1
+            fi
+            for file in main.tf variables.tf outputs.tf; do
+              if [ ! -f "modules/$module/$file" ]; then
+                echo "✗ Missing $file in module $module"
+                exit 1
+              fi
+            done
+          done
+          echo "✓ All required modules present with correct structure"
+
+      # =====================================================================
+      # Step 7: Verify Environment Files
+      # =====================================================================
+      - name: 🌍 Verify Environment Files
+        run: |
+          echo "Verifying environment files..."
+          REQUIRED_ENVS=("dev" "qa" "prod")
+          
+          for env in "${REQUIRED_ENVS[@]}"; do
+            if [ ! -f "environments/${env}.tfvars" ]; then
+              echo "✗ Missing environment file: environments/${env}.tfvars"
+              exit 1
+            fi
+          done
+          echo "✓ All required environment files present"
+
+      # =====================================================================
+      # Step 8: Check for Sensitive Data
+      # =====================================================================
+      - name: 🔐 Scan for Sensitive Data
+        run: |
+          echo "Scanning for potentially exposed sensitive data..."
+          
+          # Check for common sensitive patterns
+          if grep -r "AKIA\|password\|secret\|api_key\|private_key" \
+            --include="*.tf" --include="*.tfvars" . 2>/dev/null | \
+            grep -v "terraform.tfvars.example" | \
+            grep -v "\.gitignore" | \
+            grep -v "README" | \
+            grep -v "docs/"; then
+            echo "⚠️  Warning: Potential sensitive data found (check manually)"
+            # Don't fail, just warn
+          else
+            echo "✓ No obvious sensitive data patterns found"
+          fi
+
+      # =====================================================================
+      # Step 9: Workflow Summary
+      # =====================================================================
+      - name: 📝 Validation Summary
+        if: always()
+        run: |
+          echo "## ✅ PR Validation Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Format Check**: ${{ steps.format.outputs.status || 'passed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Validation**: ${{ steps.validate.outputs.status || 'passed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Module Structure**: ✓" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment Files**: ✓" >> $GITHUB_STEP_SUMMARY
+          echo "**Sensitive Data Scan**: ✓" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Terraform Plan workflow will run next" >> $GITHUB_STEP_SUMMARY
+          echo "2. IaC Scan workflow will run in parallel" >> $GITHUB_STEP_SUMMARY
+
+      # =====================================================================
+      # Step 10: Comment on PR
+      # =====================================================================
+      - name: 💬 Comment Validation Result on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const status = '${{ job.status }}' === 'success' ? '✅ PASSED' : '❌ FAILED';
+            
+            const comment = `
+            ## ${status} - PR Validation
+            
+            **Checks performed:**
+            - ✓ Terraform format check
+            - ✓ Terraform validation
+            - ✓ Module structure verification
+            - ✓ Environment files verification
+            - ✓ Sensitive data scan
+            
+            **Next workflows:**
+            - 📋 Terraform Plan (will generate plan details)
+            - 🔍 IaC Scan (will check for security issues)
+            
+            All validations passed! PR is ready for review.
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

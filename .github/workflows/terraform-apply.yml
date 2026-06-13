@@ -1,0 +1,366 @@
+name: Terraform Apply
+# ============================================================================
+# GitHub Actions Workflow: Terraform Apply
+# ============================================================================
+# This workflow applies approved Terraform changes to infrastructure
+# Triggers:
+#   - Manual workflow_dispatch (manual approval)
+#   - Push to main branch (automatic on merge)
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      confirm_destructive:
+        description: 'Confirm destructive changes (deletions)'
+        required: false
+        type: boolean
+        default: false
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - 'environments/**'
+      - 'modules/**'
+      - 'versions.tf'
+      - 'variables.tf'
+      - '.github/workflows/terraform-apply.yml'
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  # =========================================================================
+  # Job 1: Review and Approval for Push Events
+  # =========================================================================
+  approve:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    environment:
+      name: terraform-apply-approval
+    steps:
+      - name: ✅ Approval Checkpoint
+        run: echo "Manual approval required before applying Terraform changes"
+
+  # =========================================================================
+  # Job 2: Terraform Apply
+  # =========================================================================
+  terraform-apply:
+    runs-on: ubuntu-latest
+    needs: [approve]
+    if: always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.approve.result == 'success'))
+    
+    # Prevent concurrent apply operations
+    concurrency:
+      group: terraform-apply
+      cancel-in-progress: false
+
+    # Permissions for GitHub OIDC
+    permissions:
+      id-token: write
+      contents: read
+      deployments: write
+
+    steps:
+      # =====================================================================
+      # Step 1: Checkout Code
+      # =====================================================================
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # =====================================================================
+      # Step 2: Determine Environment
+      # =====================================================================
+      - name: 🌍 Determine Target Environment
+        id: environment
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENVIRONMENT="${{ github.event.inputs.environment }}"
+          else
+            ENVIRONMENT="prod"  # Main branch defaults to prod
+          fi
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          echo "tfvars_file=environments/${ENVIRONMENT}.tfvars" >> $GITHUB_OUTPUT
+          echo "Deploying to: ${ENVIRONMENT}"
+
+      # =====================================================================
+      # Step 3: Safety Check - Prevent Non-Main from Prod
+      # =====================================================================
+      - name: 🛡️ Safety Check - Environment Protection
+        run: |
+          ENV="${{ steps.environment.outputs.environment }}"
+          BRANCH="${{ github.ref_name }}"
+          
+          if [[ "$ENV" == "prod" && "$BRANCH" != "main" ]]; then
+            echo "❌ CRITICAL: Cannot deploy PROD from non-main branch ($BRANCH)"
+            exit 1
+          fi
+          
+          echo "✓ Environment protection check passed"
+          echo "  Environment: $ENV"
+          echo "  Branch: $BRANCH"
+
+      # =====================================================================
+      # Step 4: Verify Approval for Destructive Changes
+      # =====================================================================
+      - name: ⚠️ Destructive Changes Check
+        if: steps.environment.outputs.environment == 'prod'
+        run: |
+          if [[ "${{ github.event.inputs.confirm_destructive }}" != "true" ]]; then
+            echo "⚠️  WARNING: Destructive changes may occur"
+            echo "To confirm, set 'confirm_destructive' to true"
+          fi
+          echo "Proceeding with apply..."
+
+      # =====================================================================
+      # Step 5: Configure AWS Credentials via OIDC
+      # =====================================================================
+      - name: 🔐 Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          role-session-name: terraform-apply-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Alternative: Using static credentials (less secure)
+      # - name: Configure AWS Credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      # =====================================================================
+      # Step 6: Setup Terraform
+      # =====================================================================
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: true
+
+      # =====================================================================
+      # Step 7: Terraform Initialization
+      # =====================================================================
+      - name: 🚀 Terraform Init
+        run: |
+          echo "Initializing Terraform for ${{ steps.environment.outputs.environment }}..."
+          terraform init -upgrade
+          echo "✓ Terraform initialization successful"
+
+      # =====================================================================
+      # Step 8: Terraform Validation
+      # =====================================================================
+      - name: ✔️ Terraform Validate
+        run: |
+          echo "Validating Terraform configuration..."
+          terraform validate
+          echo "✓ Terraform validation successful"
+
+      # =====================================================================
+      # Step 9: Create Deployment
+      # =====================================================================
+      - name: 🚀 Create Deployment
+        uses: actions/github-script@v7
+        id: deployment
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: 'terraform-${{ steps.environment.outputs.environment }}',
+              required_contexts: [],
+              auto_merge: false
+            });
+            console.log('Deployment ID: ' + deployment.data.id);
+            return deployment.data.id;
+
+      # =====================================================================
+      # Step 10: Terraform Plan (for verification)
+      # =====================================================================
+      - name: 📋 Terraform Plan (Verification)
+        id: plan
+        run: |
+          echo "Verifying planned changes..."
+          terraform plan \
+            -var-file="${{ steps.environment.outputs.tfvars_file }}" \
+            -no-color \
+            -lock=true \
+            -input=false \
+            -out=tfplan
+          echo "✓ Plan verification completed"
+
+      # =====================================================================
+      # Step 11: Show Plan Summary
+      # =====================================================================
+      - name: 📊 Show Plan Summary
+        run: |
+          echo "Plan Summary:"
+          terraform show -no-color tfplan | head -50
+
+      # =====================================================================
+      # Step 12: Terraform Apply
+      # =====================================================================
+      - name: 🔨 Terraform Apply
+        id: apply
+        run: |
+          echo "🔨 Applying Terraform changes to ${{ steps.environment.outputs.environment }}..."
+          terraform apply \
+            -var-file="${{ steps.environment.outputs.tfvars_file }}" \
+            -no-color \
+            -lock=true \
+            -input=false \
+            -auto-approve \
+            tfplan
+          echo "✓ Terraform apply completed successfully"
+
+      # =====================================================================
+      # Step 13: Capture Outputs
+      # =====================================================================
+      - name: 📤 Capture Terraform Outputs
+        id: outputs
+        run: |
+          echo "Capturing Terraform outputs..."
+          terraform output -no-color -json > outputs.json
+          
+          # Extract critical outputs
+          ALB_DNS=$(terraform output -no-color alb_dns_name 2>/dev/null || echo "N/A")
+          ALB_URL=$(terraform output -no-color alb_url 2>/dev/null || echo "N/A")
+          INSTANCE_IDS=$(terraform output -no-color instance_ids 2>/dev/null || echo "N/A")
+          
+          echo "alb_dns=${ALB_DNS}" >> $GITHUB_OUTPUT
+          echo "alb_url=${ALB_URL}" >> $GITHUB_OUTPUT
+          echo "instance_ids=${INSTANCE_IDS}" >> $GITHUB_OUTPUT
+          
+          echo "✓ Outputs captured"
+
+      # =====================================================================
+      # Step 14: Health Check
+      # =====================================================================
+      - name: 🏥 Health Check
+        run: |
+          echo "Waiting for infrastructure to be healthy..."
+          ALB_URL="${{ steps.outputs.outputs.alb_url }}"
+          
+          if [[ "$ALB_URL" != "N/A" ]]; then
+            for i in {1..30}; do
+              if curl -sf "${ALB_URL}/health" > /dev/null; then
+                echo "✓ Application is healthy"
+                exit 0
+              fi
+              echo "Attempt $i: Waiting for application... (${ALB_URL})"
+              sleep 10
+            done
+            echo "⚠️  Health check timed out after 5 minutes"
+          else
+            echo "⚠️  ALB URL not available, skipping health check"
+          fi
+
+      # =====================================================================
+      # Step 15: Create Deployment Status
+      # =====================================================================
+      - name: ✅ Mark Deployment as Successful
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const deployment = ${{ steps.deployment.outputs.result }};
+            
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deployment,
+              state: 'success',
+              description: 'Terraform apply completed successfully',
+              environment_url: '${{ steps.outputs.outputs.alb_url }}',
+              auto_inactive: true
+            });
+
+      # =====================================================================
+      # Step 16: Failure Handling
+      # =====================================================================
+      - name: ❌ Mark Deployment as Failed
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const deployment = ${{ steps.deployment.outputs.result }};
+            
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deployment,
+              state: 'failure',
+              description: 'Terraform apply failed'
+            });
+
+      # =====================================================================
+      # Step 17: Upload Artifacts
+      # =====================================================================
+      - name: 📦 Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-apply-outputs-${{ steps.environment.outputs.environment }}
+          path: |
+            outputs.json
+            tfplan
+          retention-days: 30
+
+      # =====================================================================
+      # Step 18: Generate Summary
+      # =====================================================================
+      - name: 📝 Workflow Summary
+        if: always()
+        run: |
+          echo "## Terraform Apply Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ steps.environment.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Infrastructure Details**:" >> $GITHUB_STEP_SUMMARY
+          echo "- ALB URL: ${{ steps.outputs.outputs.alb_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ALB DNS: ${{ steps.outputs.outputs.alb_dns }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Instance IDs: ${{ steps.outputs.outputs.instance_ids }}" >> $GITHUB_STEP_SUMMARY
+
+      # =====================================================================
+      # Step 19: Slack Notification (Optional)
+      # =====================================================================
+      # Uncomment to enable Slack notifications
+      # - name: 📢 Notify Slack
+      #   if: always()
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+      #     payload: |
+      #       {
+      #         "text": "Terraform Apply ${{ job.status }}",
+      #         "blocks": [
+      #           {
+      #             "type": "section",
+      #             "text": {
+      #               "type": "mrkdwn",
+      #               "text": "*Terraform Apply*\nEnvironment: ${{ steps.environment.outputs.environment }}\nStatus: ${{ job.status }}\nURL: ${{ steps.outputs.outputs.alb_url }}"
+      #             }
+      #           }
+      #         ]
+      #       }

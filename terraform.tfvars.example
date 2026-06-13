@@ -1,0 +1,58 @@
+# ============================================================================
+# Terraform Example Variables File
+# ============================================================================
+# Copy this file to terraform.tfvars for local testing
+# Example: cp terraform.tfvars.example terraform.tfvars
+# Then fill in with your actual values
+# ============================================================================
+
+# AWS Region
+aws_region = "us-east-1"
+
+# VPC CIDR Block
+vpc_cidr = "10.0.0.0/16"
+
+# Public Subnets CIDR blocks (must be at least 2 for multi-AZ)
+public_subnet_cidrs = [
+  "10.0.1.0/24",   # AZ 1
+  "10.0.2.0/24"    # AZ 2
+]
+
+# EC2 Instance Type
+instance_type = "t3.micro"
+
+# Number of EC2 Instances
+instance_count = 2
+
+# Root volume size in GB
+root_volume_size = 30
+
+# Admin CIDR blocks for SSH access
+# IMPORTANT: Replace with your actual IP or VPN CIDR
+# To find your IP: curl https://ifconfig.me
+admin_cidr_blocks = [
+  "203.0.113.0/32"  # Your IP address - REPLACE THIS
+]
+
+# CloudWatch Alarms thresholds
+cpu_alarm_threshold              = 70
+response_time_alarm_threshold    = 1.0
+request_count_alarm_threshold    = 10000
+
+# Monitoring settings
+log_retention_days   = 7
+enable_dashboard     = true
+enable_error_logging = true
+alarm_email          = "your-email@example.com"
+
+# ALB settings
+enable_deletion_protection = false
+
+# Resource Tags
+tags = {
+  Environment = "dev"
+  Project     = "terraform-interview-demo"
+  ManagedBy   = "Terraform"
+  CostCenter  = "Engineering"
+  Owner       = "your-name"
+}

@@ -1,0 +1,244 @@
+name: IaC Scan
+
+# ============================================================================
+# GitHub Actions Workflow: IaC Security Scan
+# ============================================================================
+# Scans Terraform code for security and best practice violations
+# Runs on pull requests after PR Validation
+# ============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/**'
+      - 'environments/**'
+      - 'modules/**'
+      - 'versions.tf'
+      - 'variables.tf'
+      - 'locals.tf'
+      - '.github/workflows/iac-scan.yml'
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  iac-scan:
+    runs-on: ubuntu-latest
+    name: Terraform IaC Security Scan
+
+    # Prevent concurrent runs
+    concurrency:
+      group: iac-scan-${{ github.ref }}
+      cancel-in-progress: false
+
+    # Permissions for commenting on PR
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # =====================================================================
+      # Step 1: Checkout Code
+      # =====================================================================
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # =====================================================================
+      # Step 2: Setup Terraform
+      # =====================================================================
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: true
+
+      # =====================================================================
+      # Step 3: TFLint Setup and Configuration
+      # =====================================================================
+      - name: 🔍 Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      # =====================================================================
+      # Step 4: TFLint Initialization
+      # =====================================================================
+      - name: Initialize TFLint
+        run: |
+          echo "Initializing TFLint plugins..."
+          tflint --init
+          echo "✓ TFLint initialized"
+
+      # =====================================================================
+      # Step 5: Run TFLint Checks
+      # =====================================================================
+      - name: 🛡️ Run TFLint Security Checks
+        id: tflint
+        run: |
+          echo "Running TFLint security and best practice checks..."
+          
+          # Run TFLint with JSON output for parsing
+          tflint --format=json --recursive . > tflint-report.json 2>&1 || true
+          
+          # Also run with compact format for readability
+          tflint --format=compact --recursive . | tee tflint-report.txt || true
+          
+          # Count issues by severity
+          ERROR_COUNT=$(jq '[.issues[] | select(.rule.severity == "error")] | length' tflint-report.json 2>/dev/null || echo "0")
+          WARNING_COUNT=$(jq '[.issues[] | select(.rule.severity == "warning")] | length' tflint-report.json 2>/dev/null || echo "0")
+          
+          echo "errors=${ERROR_COUNT}" >> $GITHUB_OUTPUT
+          echo "warnings=${WARNING_COUNT}" >> $GITHUB_OUTPUT
+          
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "⚠️  TFLint found $ERROR_COUNT errors"
+          fi
+          if [ "$WARNING_COUNT" -gt 0 ]; then
+            echo "⚠️  TFLint found $WARNING_COUNT warnings"
+          fi
+
+      # =====================================================================
+      # Step 6: Security Best Practices Check
+      # =====================================================================
+      - name: 🔐 Verify Security Best Practices
+        id: security
+        run: |
+          echo "Checking Terraform security best practices..."
+          
+          ISSUES=0
+          
+          # Check for encryption settings
+          if ! grep -r "encrypted\s*=\s*true" modules/ --include="*.tf" > /dev/null; then
+            echo "⚠️  Warning: Not all resources have encryption enabled"
+          fi
+          
+          # Check for IAM policies with wildcards (risky)
+          if grep -r 'Action.*\*' modules/ --include="*.tf" | grep -v "# Allow" > /dev/null; then
+            echo "⚠️  Warning: Found IAM policies with wildcard actions (potential security risk)"
+            ((ISSUES++))
+          fi
+          
+          # Check for open security groups (0.0.0.0/0)
+          if grep -r "0\.0\.0\.0/0" modules/security-group/ --include="*.tf" | grep -i ingress > /dev/null; then
+            echo "✓ Open security group rules found (review required if not intentional)"
+          fi
+          
+          echo "security_issues=${ISSUES}" >> $GITHUB_OUTPUT
+
+      # =====================================================================
+      # Step 7: Module Complexity Analysis
+      # =====================================================================
+      - name: 📊 Analyze Module Complexity
+        run: |
+          echo "Analyzing module complexity..."
+          
+          for module in modules/*; do
+            if [ -d "$module" ]; then
+              MODULE_NAME=$(basename "$module")
+              RESOURCE_COUNT=$(grep -r "^resource\|^data" "$module" --include="*.tf" | wc -l)
+              VARIABLE_COUNT=$(grep -r "^variable" "$module" --include="*.tf" | wc -l)
+              OUTPUT_COUNT=$(grep -r "^output" "$module" --include="*.tf" | wc -l)
+              
+              echo "📦 Module: $MODULE_NAME"
+              echo "   - Resources/Data sources: $RESOURCE_COUNT"
+              echo "   - Variables: $VARIABLE_COUNT"
+              echo "   - Outputs: $OUTPUT_COUNT"
+            fi
+          done
+
+      # =====================================================================
+      # Step 8: Upload Scan Report
+      # =====================================================================
+      - name: 📦 Upload Scan Reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: iac-scan-reports
+          path: |
+            tflint-report.json
+            tflint-report.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # =====================================================================
+      # Step 9: Create Detailed Scan Summary
+      # =====================================================================
+      - name: 📝 Workflow Summary
+        if: always()
+        run: |
+          echo "## 🛡️ IaC Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**TFLint Errors**: ${{ steps.tflint.outputs.errors || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**TFLint Warnings**: ${{ steps.tflint.outputs.warnings || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Security Issues**: ${{ steps.security.outputs.security_issues || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Scanned Areas:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ TFLint rules and best practices" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Encryption settings" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ IAM security policies" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Security group configurations" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Module complexity analysis" >> $GITHUB_STEP_SUMMARY
+
+      # =====================================================================
+      # Step 10: Comment on PR with Scan Results
+      # =====================================================================
+      - name: 💬 Comment Scan Results on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            let report = '';
+            try {
+              if (fs.existsSync('tflint-report.txt')) {
+                report = fs.readFileSync('tflint-report.txt', 'utf8');
+              }
+            } catch (e) {
+              report = 'No detailed report available';
+            }
+            
+            const comment = `
+            ## 🛡️ IaC Security Scan Results
+            
+            **Summary:**
+            - TFLint Errors: ${{ steps.tflint.outputs.errors || '0' }}
+            - TFLint Warnings: ${{ steps.tflint.outputs.warnings || '0' }}
+            - Security Issues: ${{ steps.security.outputs.security_issues || '0' }}
+            
+            **Checks Performed:**
+            - ✓ TFLint security and best practice rules
+            - ✓ Encryption configuration verification
+            - ✓ IAM policy analysis
+            - ✓ Security group configuration review
+            - ✓ Module complexity analysis
+            
+            <details>
+            <summary>📋 Detailed TFLint Report</summary>
+            
+            \`\`\`
+            ${report || 'No issues found'}
+            \`\`\`
+            
+            </details>
+            
+            **Recommendations:**
+            - Review any warnings and errors above
+            - Ensure sensitive data is not exposed
+            - Verify security group rules are intentional
+            - Check that encryption is enabled where required
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

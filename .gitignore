@@ -1,0 +1,66 @@
+# ============================================================================
+# Terraform .gitignore
+# ============================================================================
+# Specifies which files should NOT be committed to version control
+# ============================================================================
+
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# .tfvars files (may contain sensitive data)
+*.tfvars
+*.tfvars.json
+!*.auto.tfvars
+
+# Ignore override files (used to override resource locally)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Include override files you do wish to add to version control
+# !example_override.tf
+# !example_override.tf.json
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Ignore plan files
+*.tfplan
+*.tfout
+
+# Ignore lock files (optional - some teams commit these)
+# .terraform.lock.hcl
+
+# Ignore crash logs
+crash.log
+crash.*.log
+
+# Ignore exclude files
+.terraformignore
+
+# Operating system files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Python virtual environments
+venv/
+env/
+
+# Terraform log files
+*.log
